@@ -2,7 +2,7 @@
 
 ![Tailbox Architecture](images/header.png)
 
-> **Work in progress.** Functional and in daily use, but still being improved. A rewrite in Go is planned to remove the Podman dependency and use Tailscale's Go library directly.
+> **Work in progress.** Functional and in daily use, but still being improved. A rewrite of the wrapper script in Go is planned.
 
 A self-contained Bash script that runs Tailscale in a rootless Podman container, exposes a SOCKS5 proxy on `localhost:1055`, and forwards all traffic to a SOCKS5 exit node on your tailnet (typically the [Tailbox Server](https://github.com/tdwgm/tailbox-server) running behind Mullvad VPN).
 
