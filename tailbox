@@ -75,6 +75,61 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # ============================================================================
+# Alias sync — update shell rc file if alias names changed in config
+# ============================================================================
+
+sync_aliases() {
+    local shell_name rc_file
+    shell_name=$(basename "${SHELL:-bash}")
+    case "$shell_name" in
+        zsh)  rc_file="$HOME/.zshrc" ;;
+        bash) rc_file="$HOME/.bashrc" ;;
+        *)    rc_file="$HOME/.${shell_name}rc" ;;
+    esac
+
+    local marker_start="# --- tailbox aliases (managed by tailbox install) ---"
+    local marker_end="# --- end tailbox aliases ---"
+
+    # Only sync if managed aliases exist in rc file
+    grep -qF "$marker_start" "$rc_file" 2>/dev/null || return 0
+
+    # Check if current aliases match config
+    local current_ssh current_proxy
+    current_ssh=$(sed -n "/${marker_start//\//\\/}/,/${marker_end//\//\\/}/p" "$rc_file" \
+        | grep -oP '^function \K[^ (]+' | head -1)
+    current_proxy=$(sed -n "/${marker_start//\//\\/}/,/${marker_end//\//\\/}/p" "$rc_file" \
+        | grep -oP '^function \K[^ (]+' | tail -1)
+
+    [[ "$current_ssh" == "$SSH_ALIAS" && "$current_proxy" == "$PROXY_ALIAS" ]] && return 0
+
+    # Aliases changed — rebuild block
+    local alias_block
+    alias_block=$(cat <<ALIASEOF
+${marker_start}
+function ${SSH_ALIAS}() {
+    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^tailbox\$'; then
+        echo "${SSH_ALIAS}: tailbox not running. Start with: tailbox" >&2
+        return 1
+    fi
+    TERM=xterm-256color proxychains4 -q -f ~/.proxychains-tailscale.conf ssh "\$@"
+}
+
+function ${PROXY_ALIAS}() {
+    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^tailbox\$'; then
+        echo "${PROXY_ALIAS}: tailbox not running. Start with: tailbox" >&2
+        return 1
+    fi
+    proxychains4 -q -f ~/.proxychains-tailscale.conf "\$@"
+}
+${marker_end}
+ALIASEOF
+)
+    sed -i "/${marker_start//\//\\/}/,/${marker_end//\//\\/}/d" "$rc_file"
+    printf '\n%s\n' "$alias_block" >> "$rc_file"
+    echo -e "${GREEN}Updated aliases in ${rc_file}:${NC} ${SSH_ALIAS} (ssh), ${PROXY_ALIAS} (proxy)"
+}
+
+# ============================================================================
 # Image management (pinning + update check + custom build)
 # ============================================================================
 
@@ -212,6 +267,9 @@ ensure_image() {
 # ============================================================================
 
 start() {
+    # Sync shell aliases if config changed
+    sync_aliases
+
     # Periodic update check (24h cadence, skipped if offline)
     if should_check_updates; then
         check_for_updates yes || true
@@ -897,10 +955,10 @@ ALIASEOF
     # 8. Authentication
     echo ""
     echo -e "${BOLD}Authentication:${NC}"
-    echo "  On first start, a login URL will be shown."
-    echo "  Open it in your browser to connect this node to your tailnet."
+    echo "  On first start, a login URL will open in your browser."
+    echo "  Log in to your Tailscale account to connect this node."
     echo ""
-    echo "  Alternative: pre-configure an auth key for headless use"
+    echo "  Alternative: pre-configure an auth key (advanced)"
     if [[ -t 0 ]]; then
         local authkey_choice
         read -r -p "  Set up an auth key now? [y/N] " authkey_choice
@@ -970,6 +1028,13 @@ CONFEOF
 
 case "${1:-}" in
     ""|start)
+        if [[ ! -f "$TAILBOX_CONF" ]]; then
+            echo -e "${YELLOW}No configuration found. Running first-time setup...${NC}"
+            echo ""
+            install_script
+            echo ""
+            echo -e "${YELLOW}Starting tailbox...${NC}"
+        fi
         start
         ;;
     stop)
@@ -985,7 +1050,7 @@ case "${1:-}" in
         check_for_updates yes
         ;;
     build)
-        build_local_image "$(pinned_digest)"
+        ensure_image
         ;;
     logs)
         logs
