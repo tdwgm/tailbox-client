@@ -36,15 +36,14 @@ chmod +x ~/.local/bin/tailbox
 ## Quick Start
 
 ```bash
-# 1. Install: copies script, pins + builds the container image, sets up proxychains and shell aliases
-tailbox install
-
-# 2. Start -- on first run, a login URL is shown (or opens in your browser)
+# 1. Start -- runs the install wizard automatically on first use
 tailbox
 
-# 3. Done -- SOCKS5 proxy is live on localhost:1055
+# 2. Done -- SOCKS5 proxy is live on localhost:1055
 curl --socks5-hostname localhost:1055 https://am.i.mullvad.net/connected
 ```
+
+On the first run (when no `tailbox.conf` exists), the install wizard runs automatically: it pins and builds the container image, configures proxychains, sets up shell aliases, and prompts for exit node details. A login URL opens in your browser to connect the node to your tailnet.
 
 After the first authentication, Tailscale state is saved in `~/tailscale-container/state/`. Subsequent starts connect instantly without re-authenticating.
 
@@ -52,7 +51,7 @@ After the first authentication, Tailscale state is saved in `~/tailscale-contain
 
 | Command | Description |
 |---------|-------------|
-| `tailbox` / `tailbox start` | Start the container, apply kill switch, start SOCKS forward |
+| `tailbox` / `tailbox start` | Start the container, apply kill switch, start SOCKS forward (runs install wizard on first use) |
 | `tailbox stop` | Remove the running container |
 | `tailbox status` | Show container state, proxy status, Mullvad connectivity check |
 | `tailbox exec <cmd>` | Run a `tailscale` subcommand inside the container (e.g. `tailbox exec status`) |
@@ -62,6 +61,7 @@ After the first authentication, Tailscale state is saved in `~/tailscale-contain
 | `tailbox update` | Fetch the current upstream digest and rebuild the local image |
 | `tailbox update-check` | Query the registry for a newer digest and prompt before applying |
 | `tailbox logs` | Follow container logs (`podman logs -f`) |
+| `tailbox build` | Rebuild local image from pinned digest (fetches if missing) |
 | `tailbox install` | Full installation: copy script, pin image, configure proxychains and shell aliases |
 | `tailbox info` | Detailed configuration, image, and authentication reference |
 
@@ -141,7 +141,7 @@ ssht user@host
 
 ## Configuration
 
-Edit `~/tailscale-container/tailbox.conf` to customize. Changes take effect on the next `tailbox stop && tailbox`.
+Edit `~/tailscale-container/tailbox.conf` to customize. Changes take effect on the next `tailbox stop && tailbox`. If you change `SSH_ALIAS` or `PROXY_ALIAS`, the shell functions in your rc file (`.zshrc` / `.bashrc`) are updated automatically on the next start.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -187,6 +187,8 @@ The client-side SOCKS5 proxy works via a multi-hop forwarding chain:
 ```
 
 The key design choice is `tailscale nc` for the forward leg: it opens a TCP stream to the exit node through Tailscale's userspace networking stack, so it works regardless of whether the container has a kernel `tailscale0` interface or is running in userspace mode.
+
+Before starting socat, tailbox verifies exit node reachability using a TCP probe (`tailscale nc` to the SOCKS port) rather than `tailscale ping`. The disco protocol used by `tailscale ping` traverses DERP relays and can succeed even when the actual TCP path is broken, giving false positives. The TCP probe tests exactly what socat will use.
 
 `socat` is baked into the local image at install time (not downloaded at container start), so the image is fully self-contained after `tailbox install`.
 
