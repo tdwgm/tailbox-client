@@ -18,3 +18,4 @@ authkey
 *.key
 *.pem
 .env
+docs/
