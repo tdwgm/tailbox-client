@@ -895,7 +895,7 @@ PCEOF
         inst_ssh_alias="${inst_ssh_alias:-ssht}"
         echo ""
         echo -e "  ${BOLD}Generic proxy alias${NC} — pipe any command through the proxy"
-        echo -e "    e.g. ${CYAN}${inst_ssh_alias%% *} curl https://example.com${NC}"
+        echo -e "    e.g. ${CYAN}tb curl https://example.com${NC}"
         read -r -p "  Alias name [tb]: " inst_proxy_alias
         inst_proxy_alias="${inst_proxy_alias:-tb}"
         echo ""
