@@ -40,20 +40,24 @@ EXIT_NODE_PORT="1080"                       # microsocks port on the exit node
 
 SSH_ALIAS="${SSH_ALIAS:-ssht}"
 PROXY_ALIAS="${PROXY_ALIAS:-tb}"
-ROOTLESS=""  # auto-detect; set to "true" or "false" in tailbox.conf
+
+# Rootless is the default and the recommended mode. Rootful mode (ROOTLESS=false)
+# is discouraged and exists only to enable the in-container iptables kill switch,
+# which guards against a narrow threat (a compromised tailscale binary phoning
+# home to non-tailscale infrastructure) at the cost of requiring sudo on every
+# start, root-owned state, and extra friction. For normal use, leave this unset.
+# To opt into rootful mode, add ROOTLESS=false to tailbox.conf.
+ROOTLESS=""  # empty = default (true)
 
 TAILBOX_CONF="$CONTAINER_DIR/tailbox.conf"
 # shellcheck source=/dev/null
 [[ -f "$TAILBOX_CONF" ]] && source "$TAILBOX_CONF"
 
-# Auto-detect rootless: use rootless if podman works without sudo
-if [[ -z "$ROOTLESS" ]]; then
-    if podman info &>/dev/null; then
-        ROOTLESS=true
-    else
-        ROOTLESS=false
-    fi
-fi
+# Default to rootless. If the user explicitly set ROOTLESS=false in tailbox.conf,
+# honour that; otherwise force true. Rootless works in any environment where
+# 'podman' runs unprivileged; if it does not, the user should install rootless
+# podman rather than fall back to rootful silently.
+[[ -z "$ROOTLESS" ]] && ROOTLESS=true
 
 # Set podman command based on rootless mode
 if [[ "$ROOTLESS" == true ]]; then
@@ -102,21 +106,26 @@ sync_aliases() {
 
     [[ "$current_ssh" == "$SSH_ALIAS" && "$current_proxy" == "$PROXY_ALIAS" ]] && return 0
 
-    # Aliases changed — rebuild block
+    # Aliases changed — rebuild block.
+    # Liveness check uses 'ss' to look at the SOCKS port (baked in at generation
+    # time). This is port-based rather than 'podman ps' based on purpose: ss works
+    # the same whether the container is rootless or run under sudo podman, and it
+    # also verifies the thing we actually care about (the proxy is listening),
+    # not just that a container exists.
     local alias_block
     alias_block=$(cat <<ALIASEOF
 ${marker_start}
 function ${SSH_ALIAS}() {
-    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^tailbox\$'; then
-        echo "${SSH_ALIAS}: tailbox not running. Start with: tailbox" >&2
+    if ! ss -tln 2>/dev/null | grep -q ":${SOCKS_PORT} "; then
+        echo "${SSH_ALIAS}: tailbox SOCKS port ${SOCKS_PORT} not listening. Start with: tailbox" >&2
         return 1
     fi
     TERM=xterm-256color proxychains4 -q -f ~/.proxychains-tailscale.conf ssh "\$@"
 }
 
 function ${PROXY_ALIAS}() {
-    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^tailbox\$'; then
-        echo "${PROXY_ALIAS}: tailbox not running. Start with: tailbox" >&2
+    if ! ss -tln 2>/dev/null | grep -q ":${SOCKS_PORT} "; then
+        echo "${PROXY_ALIAS}: tailbox SOCKS port ${SOCKS_PORT} not listening. Start with: tailbox" >&2
         return 1
     fi
     proxychains4 -q -f ~/.proxychains-tailscale.conf "\$@"
@@ -467,8 +476,8 @@ apply_kill_switch() {
 
 start_exit_node_forward() {
     # Wait for exit node to become reachable (peer discovery via DERP can take 10-15s)
-    # Use TCP probe (tailscale nc) instead of disco ping — ping fails through DERP relays
-    # even when TCP connectivity works fine
+    # Use TCP probe (tailscale nc) instead of disco ping — disco ping via DERP is
+    # unreliable as a reachability check and can time out even when TCP works fine
     local reachable=false
     for _ in $(seq 1 4); do
         if $PM exec "$CONTAINER_NAME" timeout 5 tailscale nc "$EXIT_NODE" "$EXIT_NODE_PORT" </dev/null &>/dev/null; then
@@ -898,20 +907,22 @@ PCEOF
         if [[ "$inst_add_aliases" =~ ^[Yy]$ ]]; then
             local marker_start="# --- tailbox aliases (managed by tailbox install) ---"
             local marker_end="# --- end tailbox aliases ---"
+            # Liveness check: see the comment in sync_aliases() for why this is
+            # port-based (ss) rather than container-based (podman ps).
             local alias_block
             alias_block=$(cat <<ALIASEOF
 ${marker_start}
 function ${inst_ssh_alias}() {
-    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^tailbox\$'; then
-        echo "${inst_ssh_alias}: tailbox not running. Start with: tailbox" >&2
+    if ! ss -tln 2>/dev/null | grep -q ":${SOCKS_PORT} "; then
+        echo "${inst_ssh_alias}: tailbox SOCKS port ${SOCKS_PORT} not listening. Start with: tailbox" >&2
         return 1
     fi
     TERM=xterm-256color proxychains4 -q -f ~/.proxychains-tailscale.conf ssh "\$@"
 }
 
 function ${inst_proxy_alias}() {
-    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^tailbox\$'; then
-        echo "${inst_proxy_alias}: tailbox not running. Start with: tailbox" >&2
+    if ! ss -tln 2>/dev/null | grep -q ":${SOCKS_PORT} "; then
+        echo "${inst_proxy_alias}: tailbox SOCKS port ${SOCKS_PORT} not listening. Start with: tailbox" >&2
         return 1
     fi
     proxychains4 -q -f ~/.proxychains-tailscale.conf "\$@"

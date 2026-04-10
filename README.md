@@ -4,17 +4,16 @@
 
 > **Work in progress.** Functional and in daily use, but still being improved. A rewrite of the wrapper script in Go is planned.
 
-A self-contained Bash script that runs Tailscale in a rootless Podman container, exposes a SOCKS5 proxy on `localhost:1055`, and forwards all traffic to a SOCKS5 exit node on your tailnet (typically the [Tailbox Server](https://github.com/tdwgm/tailbox-server) running behind Mullvad VPN).
+A self-contained Bash script that runs Tailscale in a **rootless** Podman container, exposes a SOCKS5 proxy on `localhost:1055`, and forwards all traffic to a SOCKS5 exit node on your tailnet (typically the [Tailbox Server](https://github.com/tdwgm/tailbox-server) running behind Mullvad VPN).
 
 No system Tailscale installation required. State persists across restarts; authenticate once.
 
 ## Features
 
-- **Kill switch** -- iptables rules inside the container drop all non-Tailscale traffic on `eth0`; if Tailscale disconnects, traffic stops rather than falling back to the host's plain network
+- **Rootless by default** -- runs under unprivileged `podman` with no sudo, no root-owned state, no capability grants. Rootful mode exists as an opt-in for the in-container kill switch but is discouraged; see *Rootful mode* below
 - **Image digest pinning** -- the upstream Tailscale image is pinned by `@sha256:` digest at install time; updates require an explicit `tailbox update` and a user prompt
 - **One-command install** -- `tailbox install` copies the script, pins and builds the container image, configures proxychains, and sets up shell aliases
 - **Zero DNS leaks** -- DNS queries from proxied applications resolve through the exit node's network, not the host
-- **Rootless auto-detection** -- uses `podman` if rootless works, falls back to `sudo podman` otherwise
 - **Persistent state** -- Tailscale state is saved in `~/tailscale-container/state/`; subsequent starts connect instantly without re-authenticating
 
 ## Install
@@ -192,9 +191,9 @@ Before starting socat, tailbox verifies exit node reachability using a TCP probe
 
 `socat` is baked into the local image at install time (not downloaded at container start), so the image is fully self-contained after `tailbox install`.
 
-### Kill Switch
+### Kill Switch (rootful mode only)
 
-After the container connects to Tailscale, `iptables` rules are applied inside the container to drop all `eth0` (Podman bridge) traffic except what Tailscale itself needs. If Tailscale loses its connection, traffic stops rather than routing through the host's plain network.
+In **rootful mode only** (`ROOTLESS=false` in `tailbox.conf`), after the container connects to Tailscale, `iptables` rules are applied inside the container to drop all `eth0` (Podman bridge) traffic except what Tailscale itself needs. If Tailscale loses its connection, traffic stops rather than routing through the host's plain network.
 
 | Chain | Interface | Match | Action |
 |-------|-----------|-------|--------|
@@ -212,7 +211,55 @@ After the container connects to Tailscale, `iptables` rules are applied inside t
 | INPUT | eth0 | tcp dport 8080 | ACCEPT (HTTP proxy from host) |
 | INPUT | eth0 | any | **DROP** |
 
-The `iptable_filter` kernel module must be loaded before the container starts. Tailbox loads it automatically via `sudo modprobe iptable_filter` when running in non-rootless mode. In rootless mode, the kill switch is skipped (Podman rootless containers do not have the capability to load kernel modules or set iptables rules by default).
+The `iptable_filter` kernel module must be loaded before the container starts. Tailbox loads it automatically via `sudo modprobe iptable_filter` when running in rootful mode.
+
+### Why Rootless Mode Does Not Leak
+
+The most common pushback on running tailbox rootless is "but then there is no kill switch, so what happens when Tailscale drops?". The answer is that the proxy chain is fail-closed by construction, not by firewall rule, so there is nothing to leak in the first place.
+
+Look again at the path from an application to the internet, which is the same chain described in "Socat Forwarding Chain" above:
+
+```text
+app -> localhost:1055 -> podman port-map -> container:1081 -> socat -> EXEC:tailscale nc -> tailscaled -> exit node
+```
+
+There is no IP-level forwarding anywhere on this path. No `default via tailscale0`, no route injection on the host, nothing that binds an application socket to the tunnel at the kernel level. Each incoming SOCKS connection spawns a `tailscale nc` subprocess that opens a TCP stream through the running tailscaled daemon. If tailscaled is stopped, disconnected, crashed, or its unix socket has gone away, `tailscale nc` fails immediately, socat closes the client connection, and the application gets `ECONNRESET`. There is no alternate path for the traffic to take.
+
+Compare this to a conventional VPN kill switch scenario. A host running WireGuard or OpenVPN typically has `default via <vpn-gw>` pointing at `tun0`. When the VPN drops, the default route reverts to the physical gateway and traffic silently flows via the ISP. That is exactly when an iptables kill switch is load-bearing: it is a safety net for a failure mode where the kernel will happily forward traffic the wrong way. The tailbox client has no such failure mode. The SOCKS port on `localhost:1055` is the only way in, and the socat-plus-`tailscale nc` pair cannot forward anything when tailscaled is not reachable.
+
+### Workarounds for Rootless iptables
+
+If you still want a packet-level kill switch in rootless mode, the Podman capability limitation is not absolute. A few options that actually work:
+
+- **`podman unshare --rootless-netns`**. Enter the rootless container's network namespace from the host and apply rules inside it, for example `podman unshare --rootless-netns iptables -A OUTPUT -o eth0 -j DROP`. Works, but the rootless netns is recreated on every container start, so you need a wrapper script to reapply the rules after each start.
+- **`--cap-add=NET_ADMIN` with pasta networking**. On Podman 4.4 and newer the pasta networking backend grants capabilities inside the user namespace in a way that can let iptables modify the container's own netfilter tables. Needs the relevant kernel modules loaded on the host and iptables userspace present in the container image.
+- **A sentinel without iptables at all**. A systemd user service (or a small supervisor inside the container) that polls `tailscale status` and kills socat the moment the daemon becomes unreachable. Reactive rather than preventive, but it reaches the same end state: no proxy, no traffic.
+
+None of these are enabled by default, because per the section above they solve a problem that does not actually exist on this client. They are listed here for anyone who needs belt-and-suspenders hardening against a compromised `tailscaled` binary (see the threat model in "Rootful mode" below); for that specific case they are viable alternatives to running the whole client as root.
+
+### Rootful mode (discouraged)
+
+Rootless is the default and is the recommended way to run Tailbox. Rootful mode (`ROOTLESS=false` in `~/tailscale-container/tailbox.conf`) exists only to enable the in-container kill switch above. Before opting in, be aware of the trade-off.
+
+**What rootful gives you that rootless does not:**
+
+- The iptables kill switch inside the container (the table above).
+- Kernel-mode `tailscale0` tun device instead of Tailscale's userspace networking. This makes **no functional difference** for the SOCKS proxy, because `socat EXEC:tailscale nc` uses Tailscale's internal TCP proxy in both modes.
+
+**What the kill switch actually protects against:**
+
+- A compromised `tailscaled` binary making outbound connections to infrastructure other than Tailscale's control plane or DERP relays. Because the upstream image is pinned by `@sha256:` digest, this is a narrow threat (supply-chain compromise of an already-pinned digest).
+- It does **not** prevent SOCKS traffic leaks if Tailscale drops, because `socat EXEC:tailscale nc` cannot forward anything when `tailscale nc` exec fails. The proxy simply stops working, which is the safe behaviour you want.
+- It does **not** prevent DNS leaks, because DNS (udp/tcp 53) is whitelisted in the kill switch anyway.
+
+**What rootful costs you:**
+
+- A sudo password (or cached credential) on every `tailbox start`.
+- State directory owned by root; migrating back to rootless requires fixing ownership (the script does this automatically when it notices).
+- Alias liveness checks and any other user-space tooling that talks to `podman` must route through `sudo podman` too. Easy to get wrong; the old `podman ps`-based alias check shipped broken in rootful mode for exactly this reason.
+- You can no longer run `tailbox` as the regular user who installed it without re-typing the sudo password.
+
+**Recommendation:** leave `ROOTLESS` unset (or explicitly `true`) and accept that the client-side kill switch is not applied. The default is rootless precisely because rootful's gain (a narrow defence against a pinned-then-compromised binary) is smaller than its ongoing friction cost for a tool whose entire purpose is being lightweight and ephemeral.
 
 ## Requirements
 
