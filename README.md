@@ -280,7 +280,6 @@ If Tailbox saved you some time or annoyance, a small tip is very welcome.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/B0B11SS684)
 
-### Buy me a Lambo
 
 [![Buy me a Lambo](https://matinen.com/images/lambo-badge.png)](https://matinen.com/lambo.html)
 
